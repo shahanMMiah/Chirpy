@@ -9,4 +9,8 @@ const POST_METHOD = "POST"
 
 const CENSORSTR = "****"
 
-const DBURL = "postgres://postgres:postgres@localhost:5432/chirpy"
+const FAILEDCODE = 400
+const FORBIDDENCODE = 403
+
+const OKCODE = 200
+const NEWCODE = 201
