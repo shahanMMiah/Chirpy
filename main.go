@@ -76,6 +76,7 @@ func (a *ApiConfig) MiddlewareReqResetHandle() http.Handler {
 		a.fileserverHits.Store(0)
 
 		a.MiddleWareResetUsers().ServeHTTP(resp, req)
+		a.MiddleWareResetChirps().ServeHTTP(resp, req)
 
 		resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		resp.WriteHeader(OKCODE)
@@ -110,10 +111,15 @@ func SanatizeProfane(text string) string {
 	return cleanStr
 }
 
-func (a *ApiConfig) MiddlewareValidateChirp(chripLen int) http.Handler {
+func ValidateChirp(chirp string, chripLen int) bool {
+	return len(chirp) <= chripLen
+}
+
+func (a *ApiConfig) MiddlewareChirp(chirpLen int) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		resData := struct {
-			Body string `json:"body"`
+			Body   string `json:"body"`
+			UserId string `json:"user_id"`
 		}{}
 
 		reqData, err := io.ReadAll(req.Body)
@@ -131,18 +137,44 @@ func (a *ApiConfig) MiddlewareValidateChirp(chripLen int) http.Handler {
 			return
 		}
 
-		if len(resData.Body) > chripLen {
+		if !ValidateChirp(resData.Body, chirpLen) {
 			ErrorJsonResp(resp, fmt.Errorf("error: Chirp is too long"), FAILEDCODE)
 			return
 		}
 
+		userId, err := uuid.Parse(resData.UserId)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+		}
+		chirpDbData, err := a.DbQueries.CreateChirps(req.Context(), database.CreateChirpsParams{
+			ID:        uuid.New(),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+			Body:      SanatizeProfane(resData.Body),
+			UserID:    userId})
+
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+		}
+
 		ChirpData := struct {
-			Cleaned_body string `json:"cleaned_body"`
-		}{Cleaned_body: SanatizeProfane(resData.Body)}
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			UserID    uuid.UUID `json:"user_id"`
+		}{
+			ID:        chirpDbData.ID,
+			CreatedAt: chirpDbData.CreatedAt,
+			UpdatedAt: chirpDbData.UpdatedAt,
+			Body:      chirpDbData.Body,
+			UserID:    chirpDbData.UserID}
 
 		jsonData, _ := json.Marshal(ChirpData)
 		resp.Header().Set("Content-Type", "application/json")
-		resp.WriteHeader(OKCODE)
+		resp.WriteHeader(NEWCODE)
 		resp.Write(jsonData)
 
 	})
@@ -214,6 +246,19 @@ func (a *ApiConfig) MiddleWareResetUsers() http.Handler {
 	})
 }
 
+func (a *ApiConfig) MiddleWareResetChirps() http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		if os.Getenv("PLATFORM") != "dev" {
+			ErrorJsonResp(resp, fmt.Errorf("Forbidden"), FORBIDDENCODE)
+		}
+
+		a.DbQueries.ResetChirps(req.Context())
+		resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		resp.WriteHeader(OKCODE)
+		resp.Write([]byte("chirps database has been reset\n"))
+	})
+}
+
 func (h *Handlers) HandleHandlers(mux *http.ServeMux) error {
 
 	for hndlName, handle := range h.HandleData {
@@ -255,7 +300,7 @@ func main() {
 	handleMap.HandleData["/metrics"] = Handler{Ns: ADMIN_NS, Handle: a.MiddlewareReqCheckHandle(), Method: GET_METHOD}
 
 	// api handlers
-	handleMap.HandleData["/validate_chirp"] = Handler{Ns: BACKEND_NS, Handle: a.MiddlewareValidateChirp(140), Method: POST_METHOD}
+	handleMap.HandleData["/chirps"] = Handler{Ns: BACKEND_NS, Handle: a.MiddlewareChirp(140), Method: POST_METHOD}
 	handleMap.HandleData["/users"] = Handler{Ns: BACKEND_NS, Handle: a.MiddleWareCreateUserHandle(), Method: POST_METHOD}
 	handleMap.HandleData["/healthz"] = Handler{Ns: BACKEND_NS, Handle: RedinisHandler(), Method: GET_METHOD}
 
