@@ -10,6 +10,7 @@ const POST_METHOD = "POST"
 const CENSORSTR = "****"
 
 const FAILEDCODE = 400
+const UNAUTHORIZED = 401
 const FORBIDDENCODE = 403
 
 const OKCODE = 200

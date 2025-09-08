@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -14,17 +15,35 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/shahanmmiah/Chirpy/internal/auth"
 	"github.com/shahanmmiah/Chirpy/internal/database"
 )
 
 type Handler struct {
 	Ns     string
 	Handle http.Handler
-	Method string
 }
 
-type Handlers struct {
-	HandleData map[string]Handler
+type Handlers map[string]map[string]Handler
+
+type ChirpJson struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
+
+type UserJson struct {
+	Password string `json:"password"`
+	Email    string `json:"email"`
+}
+
+type UserDbJson struct {
+	ID         uuid.UUID `json:"id"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdateddAt time.Time `json:"updated_at"`
+	Email      string    `json:"email"`
 }
 
 func RedinisHandler() http.Handler {
@@ -115,7 +134,74 @@ func ValidateChirp(chirp string, chripLen int) bool {
 	return len(chirp) <= chripLen
 }
 
-func (a *ApiConfig) MiddlewareChirp(chirpLen int) http.Handler {
+func (a *ApiConfig) MiddlewareGetChirps(id uuid.UUID) http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+
+		chirpDb, err := a.DbQueries.GetChirps(req.Context(), id)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		chirpJson := ChirpJson{
+			ID:        chirpDb.ID,
+			CreatedAt: chirpDb.CreatedAt,
+			UpdatedAt: chirpDb.UpdatedAt,
+			Body:      chirpDb.Body,
+			UserID:    chirpDb.UserID}
+
+		jsonData, err := json.Marshal(chirpJson)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+
+		}
+
+		resp.Header().Set("Content-type", "application/json")
+		resp.WriteHeader(OKCODE)
+		resp.Write(jsonData)
+
+	})
+
+}
+
+func (a *ApiConfig) MiddlewareGetAllChirps() http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		chirpsDb, err := a.DbQueries.GetAllChirps(req.Context())
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+
+		}
+
+		chirpsJson := []ChirpJson{}
+
+		for _, c := range chirpsDb {
+			chirpsJson = append(chirpsJson, ChirpJson{
+				ID:        c.ID,
+				CreatedAt: c.CreatedAt,
+				UpdatedAt: c.UpdatedAt,
+				Body:      c.Body,
+				UserID:    c.UserID})
+		}
+
+		slices.SortFunc(chirpsJson, func(a, b ChirpJson) int {
+			return a.CreatedAt.Compare(b.CreatedAt)
+		})
+
+		jsonData, err := json.Marshal(chirpsJson)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+
+		}
+
+		resp.Header().Set("Content-type", "application/json")
+		resp.WriteHeader(OKCODE)
+		resp.Write(jsonData)
+	})
+}
+
+func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		resData := struct {
 			Body   string `json:"body"`
@@ -159,6 +245,17 @@ func (a *ApiConfig) MiddlewareChirp(chirpLen int) http.Handler {
 			return
 		}
 
+		err = HandleHandler(
+			mux,
+			Handler{Ns: BACKEND_NS, Handle: a.MiddlewareGetChirps(chirpDbData.ID)},
+			fmt.Sprintf("/chirps/%s", chirpDbData.ID.String()),
+			GET_METHOD)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+		}
+
 		ChirpData := struct {
 			ID        uuid.UUID `json:"id"`
 			CreatedAt time.Time `json:"created_at"`
@@ -185,10 +282,7 @@ func (a *ApiConfig) MiddleWareCreateUserHandle() http.Handler {
 
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 
-		emailStruct := &struct {
-			Email string `json:"email"`
-		}{}
-
+		emailStruct := &UserJson{}
 		reqData, err := io.ReadAll(req.Body)
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
@@ -199,23 +293,24 @@ func (a *ApiConfig) MiddleWareCreateUserHandle() http.Handler {
 			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
 
+		HashedPassword, err := auth.HashPassword(emailStruct.Password)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
 		params := database.CreateUserParams{
-			ID:        uuid.New(),
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-			Email:     emailStruct.Email,
+			ID:             uuid.New(),
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+			Email:          emailStruct.Email,
+			HashedPassword: HashedPassword,
 		}
 		userDbQuiery, err := a.DbQueries.CreateUser(req.Context(), params)
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
 
-		userDbStruct := struct {
-			ID         uuid.UUID `json:"id"`
-			CreatedAt  time.Time `json:"created_at"`
-			UpdateddAt time.Time `json:"updated_at"`
-			Email      string    `json:"email"`
-		}{
+		userDbStruct := UserDbJson{
 			ID:         userDbQuiery.ID,
 			CreatedAt:  userDbQuiery.CreatedAt,
 			UpdateddAt: userDbQuiery.CreatedAt,
@@ -259,19 +354,71 @@ func (a *ApiConfig) MiddleWareResetChirps() http.Handler {
 	})
 }
 
-func (h *Handlers) HandleHandlers(mux *http.ServeMux) error {
+func (a *ApiConfig) MiddlewareLoginHandler() http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		userJson := &UserJson{}
 
-	for hndlName, handle := range h.HandleData {
-
-		if handle.Ns == "" {
-			return fmt.Errorf("%v Ns cannot be empty", hndlName)
-		}
-		if handle.Method == "" {
-			return fmt.Errorf("%v Method cannot be empty", hndlName)
+		reqData, err := io.ReadAll(req.Body)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
 
-		mux.Handle(fmt.Sprintf("%s %s%s", handle.Method, handle.Ns, hndlName), handle.Handle)
+		err = json.Unmarshal(reqData, userJson)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
 
+		userDb, err := a.DbQueries.GetUserFromEmail(req.Context(), userJson.Email)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		err = auth.CheckPasswordHash(userJson.Password, userDb.HashedPassword)
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+		}
+
+		userDbjson := UserDbJson{ID: userDb.ID,
+			CreatedAt:  userDb.CreatedAt,
+			UpdateddAt: userDb.CreatedAt,
+			Email:      userDb.Email}
+
+		userDbjsonData, err := json.Marshal(userDbjson)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		resp.Header().Set("Content-type", "application:json")
+		resp.WriteHeader(OKCODE)
+		resp.Write(userDbjsonData)
+
+	})
+}
+
+func HandleHandler(mux *http.ServeMux, handle Handler, hndlName, mthdName string) error {
+
+	if handle.Ns == "" {
+		return fmt.Errorf("%v Ns cannot be empty", hndlName)
+	}
+	if mthdName == "" {
+		return fmt.Errorf("%v Method cannot be empty", hndlName)
+	}
+
+	mux.Handle(fmt.Sprintf("%s %s%s", mthdName, handle.Ns, hndlName), handle.Handle)
+
+	return nil
+}
+
+func HandleHandlers(mux *http.ServeMux, h Handlers) error {
+
+	for hndlName, mthds := range h {
+		for mthdName, handle := range mthds {
+			err := HandleHandler(mux, handle, hndlName, mthdName)
+			if err != nil {
+				return err
+			}
+
+		}
 	}
 	return nil
 }
@@ -290,24 +437,29 @@ func main() {
 	a := ApiConfig{}
 	a.DbQueries = database.New(db)
 
-	handleMap := Handlers{HandleData: map[string]Handler{}}
+	type handlerMap map[string]Handler
+	endpointMap := Handlers{}
 
 	fileServeHandler := http.FileServer(http.Dir("."))
 	//ApiServeHandler := http.
 
 	// admin handlers
-	handleMap.HandleData["/reset"] = Handler{Ns: ADMIN_NS, Handle: a.MiddlewareReqResetHandle(), Method: POST_METHOD}
-	handleMap.HandleData["/metrics"] = Handler{Ns: ADMIN_NS, Handle: a.MiddlewareReqCheckHandle(), Method: GET_METHOD}
+	endpointMap["/reset"] = handlerMap{POST_METHOD: Handler{Ns: ADMIN_NS, Handle: a.MiddlewareReqResetHandle()}}
+	endpointMap["/metrics"] = handlerMap{GET_METHOD: Handler{Ns: ADMIN_NS, Handle: a.MiddlewareReqCheckHandle()}}
 
 	// api handlers
-	handleMap.HandleData["/chirps"] = Handler{Ns: BACKEND_NS, Handle: a.MiddlewareChirp(140), Method: POST_METHOD}
-	handleMap.HandleData["/users"] = Handler{Ns: BACKEND_NS, Handle: a.MiddleWareCreateUserHandle(), Method: POST_METHOD}
-	handleMap.HandleData["/healthz"] = Handler{Ns: BACKEND_NS, Handle: RedinisHandler(), Method: GET_METHOD}
+	endpointMap["/chirps"] = handlerMap{
+		POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareAddChirp(140, mux)},
+		GET_METHOD:  Handler{Ns: BACKEND_NS, Handle: a.MiddlewareGetAllChirps()}}
+
+	endpointMap["/users"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddleWareCreateUserHandle()}}
+	endpointMap["/healthz"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: RedinisHandler()}}
+	endpointMap["/login"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareLoginHandler()}}
 
 	// frontend handlers
-	handleMap.HandleData["/"] = Handler{Ns: FRONTEND_NS, Handle: a.MiddlewareIncHits(http.StripPrefix("/app", fileServeHandler)), Method: GET_METHOD}
+	endpointMap["/"] = handlerMap{GET_METHOD: Handler{Ns: FRONTEND_NS, Handle: a.MiddlewareIncHits(http.StripPrefix("/app", fileServeHandler))}}
 
-	handleMap.HandleHandlers(mux)
+	HandleHandlers(mux, endpointMap)
 
 	server := http.Server{
 		Handler: mux,
