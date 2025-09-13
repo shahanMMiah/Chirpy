@@ -19,6 +19,8 @@ import (
 	"github.com/shahanmmiah/Chirpy/internal/database"
 )
 
+const DEFAULTEXPIRYDURATION = time.Duration(time.Duration(DEFUALTEXPIRES) * time.Second)
+
 type Handler struct {
 	Ns     string
 	Handle http.Handler
@@ -37,13 +39,16 @@ type ChirpJson struct {
 type UserJson struct {
 	Password string `json:"password"`
 	Email    string `json:"email"`
+	//Expires  *int   `json:"expires_in_seconds"`
 }
 
 type UserDbJson struct {
-	ID         uuid.UUID `json:"id"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdateddAt time.Time `json:"updated_at"`
-	Email      string    `json:"email"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdateddAt   time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 func RedinisHandler() http.Handler {
@@ -61,6 +66,7 @@ func RedinisHandler() http.Handler {
 type ApiConfig struct {
 	fileserverHits atomic.Int32
 	DbQueries      *database.Queries
+	JwtSecret      string
 }
 
 func (a *ApiConfig) MiddlewareIncHits(handler http.Handler) http.Handler {
@@ -204,8 +210,7 @@ func (a *ApiConfig) MiddlewareGetAllChirps() http.Handler {
 func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		resData := struct {
-			Body   string `json:"body"`
-			UserId string `json:"user_id"`
+			Body string `json:"body"`
 		}{}
 
 		reqData, err := io.ReadAll(req.Body)
@@ -228,17 +233,23 @@ func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Ha
 			return
 		}
 
-		userId, err := uuid.Parse(resData.UserId)
+		bearerToken, err := auth.GetBearerToken(req.Header)
+
 		if err != nil {
-			ErrorJsonResp(resp, err, FAILEDCODE)
-			return
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
 		}
+
+		ValidId, err := auth.ValidateJWT(bearerToken, a.JwtSecret)
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+		}
+
 		chirpDbData, err := a.DbQueries.CreateChirps(req.Context(), database.CreateChirpsParams{
 			ID:        uuid.New(),
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 			Body:      SanatizeProfane(resData.Body),
-			UserID:    userId})
+			UserID:    ValidId})
 
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
@@ -279,10 +290,21 @@ func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Ha
 }
 
 func (a *ApiConfig) MiddleWareCreateUserHandle() http.Handler {
+	type NewUserJson struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	type NewUserDbJson struct {
+		ID         uuid.UUID `json:"id"`
+		CreatedAt  time.Time `json:"created_at"`
+		UpdateddAt time.Time `json:"updated_at"`
+		Email      string    `json:"email"`
+	}
 
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 
-		emailStruct := &UserJson{}
+		emailStruct := &NewUserJson{}
 		reqData, err := io.ReadAll(req.Body)
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
@@ -310,7 +332,7 @@ func (a *ApiConfig) MiddleWareCreateUserHandle() http.Handler {
 			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
 
-		userDbStruct := UserDbJson{
+		userDbStruct := NewUserDbJson{
 			ID:         userDbQuiery.ID,
 			CreatedAt:  userDbQuiery.CreatedAt,
 			UpdateddAt: userDbQuiery.CreatedAt,
@@ -354,6 +376,49 @@ func (a *ApiConfig) MiddleWareResetChirps() http.Handler {
 	})
 }
 
+func (a *ApiConfig) MiddlewareRefresh() http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		bearerToken, err := auth.GetBearerToken(req.Header)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+
+		}
+
+		refreshTokenDb, err := a.DbQueries.GetRefreshToken(req.Context(), bearerToken)
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+
+		}
+
+		if time.Now().Compare(refreshTokenDb.ExporiesAt) > 0 {
+			ErrorJsonResp(resp, fmt.Errorf("token has expired at %s", refreshTokenDb.ExporiesAt.GoString()), UNAUTHORIZED)
+		}
+
+		newAccessToken, err := auth.MakeJWT(refreshTokenDb.UserID, a.JwtSecret, DEFAULTEXPIRYDURATION)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+
+		}
+
+		refreshStruct := &struct {
+			Token string `json:"token"`
+		}{
+			Token: newAccessToken}
+
+		refreshData, err := json.Marshal(refreshStruct)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		resp.Header().Set("Content-Type", "application:json")
+		resp.WriteHeader(OKCODE)
+		resp.Write(refreshData)
+
+	})
+}
 func (a *ApiConfig) MiddlewareLoginHandler() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		userJson := &UserJson{}
@@ -378,10 +443,34 @@ func (a *ApiConfig) MiddlewareLoginHandler() http.Handler {
 			ErrorJsonResp(resp, err, UNAUTHORIZED)
 		}
 
+		signedJwtToken, err := auth.MakeJWT(userDb.ID, a.JwtSecret, DEFAULTEXPIRYDURATION)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+		}
+		refreshToken, _ := auth.MakeRefreshToken()
+
+		_, err = a.DbQueries.CreateRefreshToken(
+			req.Context(),
+			database.CreateRefreshTokenParams{
+				Token:      refreshToken,
+				CreatedAt:  time.Now(),
+				UpdatedAt:  time.Now(),
+				UserID:     userDb.ID,
+				ExporiesAt: time.Now().Add(time.Duration(60 * 24 * time.Hour)),
+				RevokedAt:  sql.NullTime{},
+			},
+		)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
 		userDbjson := UserDbJson{ID: userDb.ID,
-			CreatedAt:  userDb.CreatedAt,
-			UpdateddAt: userDb.CreatedAt,
-			Email:      userDb.Email}
+			CreatedAt:    userDb.CreatedAt,
+			UpdateddAt:   userDb.CreatedAt,
+			Email:        userDb.Email,
+			Token:        signedJwtToken,
+			RefreshToken: refreshToken}
 
 		userDbjsonData, err := json.Marshal(userDbjson)
 		if err != nil {
@@ -434,7 +523,7 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	a := ApiConfig{}
+	a := ApiConfig{JwtSecret: os.Getenv("JWT_SECRET")}
 	a.DbQueries = database.New(db)
 
 	type handlerMap map[string]Handler
@@ -452,6 +541,7 @@ func main() {
 		POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareAddChirp(140, mux)},
 		GET_METHOD:  Handler{Ns: BACKEND_NS, Handle: a.MiddlewareGetAllChirps()}}
 
+	endpointMap["/refresh"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareRefresh()}}
 	endpointMap["/users"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddleWareCreateUserHandle()}}
 	endpointMap["/healthz"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: RedinisHandler()}}
 	endpointMap["/login"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareLoginHandler()}}

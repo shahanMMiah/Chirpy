@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,31 @@ func TestJwtExpires(t *testing.T) {
 		if !strings.Contains(err.Error(), jwt.ErrTokenExpired.Error()) {
 			t.Errorf("error should be:'%s'\n but error is: '%s'", jwt.ErrTokenExpired.Error(), err.Error())
 
+		}
+
+	}
+}
+
+func TestBearerToken(t *testing.T) {
+
+	cases := []struct {
+		InputHeaderKey string
+		InputHeaderVal string
+	}{
+		{
+			InputHeaderKey: "Authorization",
+			InputHeaderVal: "Bearer testBearVal"},
+	}
+	for _, c := range cases {
+		header := http.Header{}
+		header.Add(c.InputHeaderKey, c.InputHeaderVal)
+
+		bearerToken, err := GetBearerToken(header)
+		if err != nil {
+			t.Error(err.Error())
+		}
+		if !strings.Contains(c.InputHeaderVal, bearerToken) || strings.Contains(bearerToken, "Bearer ") {
+			t.Errorf("%s does not match %s", bearerToken, c.InputHeaderVal)
 		}
 
 	}

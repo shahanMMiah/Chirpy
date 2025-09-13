@@ -1,13 +1,20 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
+
+	"net/http"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
+
+const BEARERKEY = "Authorization"
 
 func HashPassword(password string) (string, error) {
 	hashData, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -58,4 +65,26 @@ func ValidateJWT(signedToken, tokenSecret string) (uuid.UUID, error) {
 		return uuid.UUID{}, fmt.Errorf("uuid parse faulure:  %s", err.Error())
 	}
 	return id, nil
+}
+
+func GetBearerToken(h http.Header) (string, error) {
+	bearer := h.Get(BEARERKEY)
+	if bearer == "" {
+		return "", fmt.Errorf("Could not find %s Header", BEARERKEY)
+	}
+
+	tokenstring, found := strings.CutPrefix(bearer, "Bearer ")
+	if !found {
+		return "", fmt.Errorf("Bearer prefix not found in header %s", bearer)
+	}
+
+	return tokenstring, nil
+}
+
+func MakeRefreshToken() (string, error) {
+	randBytes := make([]byte, 32)
+	rand.Read(randBytes)
+	hexString := hex.EncodeToString(randBytes)
+
+	return hexString, nil
 }
