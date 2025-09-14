@@ -207,6 +207,27 @@ func (a *ApiConfig) MiddlewareGetAllChirps() http.Handler {
 	})
 }
 
+func (a *ApiConfig) MiddlewareRevokeRefreshToken() http.Handler {
+
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		bearerToken, err := auth.GetBearerToken(req.Header)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		err = a.DbQueries.RevokeRefreshToken(
+			req.Context(),
+			database.RevokeRefreshTokenParams{Token: bearerToken, RevokedAt: sql.NullTime{Time: time.Now(), Valid: true}})
+
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		resp.WriteHeader(UPDATECODE)
+		resp.Write([]byte{})
+	})
+}
+
 func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		resData := struct {
@@ -390,9 +411,12 @@ func (a *ApiConfig) MiddlewareRefresh() http.Handler {
 			ErrorJsonResp(resp, err, UNAUTHORIZED)
 
 		}
-
 		if time.Now().Compare(refreshTokenDb.ExporiesAt) > 0 {
 			ErrorJsonResp(resp, fmt.Errorf("token has expired at %s", refreshTokenDb.ExporiesAt.GoString()), UNAUTHORIZED)
+		}
+
+		if refreshTokenDb.RevokedAt.Valid {
+			ErrorJsonResp(resp, fmt.Errorf("token has revoked at %s", refreshTokenDb.RevokedAt.Time.GoString()), UNAUTHORIZED)
 		}
 
 		newAccessToken, err := auth.MakeJWT(refreshTokenDb.UserID, a.JwtSecret, DEFAULTEXPIRYDURATION)
@@ -542,6 +566,7 @@ func main() {
 		GET_METHOD:  Handler{Ns: BACKEND_NS, Handle: a.MiddlewareGetAllChirps()}}
 
 	endpointMap["/refresh"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareRefresh()}}
+	endpointMap["/revoke"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareRevokeRefreshToken()}}
 	endpointMap["/users"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddleWareCreateUserHandle()}}
 	endpointMap["/healthz"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: RedinisHandler()}}
 	endpointMap["/login"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareLoginHandler()}}
