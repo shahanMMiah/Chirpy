@@ -100,8 +100,9 @@ func (a *ApiConfig) MiddlewareReqResetHandle() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		a.fileserverHits.Store(0)
 
-		a.MiddleWareResetUsers().ServeHTTP(resp, req)
-		a.MiddleWareResetChirps().ServeHTTP(resp, req)
+		a.MiddlewareResetUsers().ServeHTTP(resp, req)
+		a.MiddlewareResetChirps().ServeHTTP(resp, req)
+		a.MiddlewareResetRefreshTokens().ServeHTTP(resp, req)
 
 		resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		resp.WriteHeader(OKCODE)
@@ -119,6 +120,21 @@ func ErrorJsonResp(resp http.ResponseWriter, err error, errorCode int) {
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(errorCode)
 	resp.Write(jsonData)
+}
+
+func ParseJson(req *http.Request, dataStruct any) error {
+
+	reqData, err := io.ReadAll(req.Body)
+
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(reqData, dataStruct)
+
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func SanatizeProfane(text string) string {
@@ -145,7 +161,7 @@ func (a *ApiConfig) MiddlewareGetChirps(id uuid.UUID) http.Handler {
 
 		chirpDb, err := a.DbQueries.GetChirps(req.Context(), id)
 		if err != nil {
-			ErrorJsonResp(resp, err, FAILEDCODE)
+			ErrorJsonResp(resp, err, NOTFOUNDCODE)
 		}
 
 		chirpJson := ChirpJson{
@@ -234,35 +250,17 @@ func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Ha
 			Body string `json:"body"`
 		}{}
 
-		reqData, err := io.ReadAll(req.Body)
-
-		if err != nil {
-			ErrorJsonResp(resp, err, FAILEDCODE)
-			return
-
-		}
-
-		err = json.Unmarshal(reqData, &resData)
-
-		if err != nil {
-			ErrorJsonResp(resp, err, FAILEDCODE)
-			return
-		}
+		err := ParseJson(req, &resData)
 
 		if !ValidateChirp(resData.Body, chirpLen) {
 			ErrorJsonResp(resp, fmt.Errorf("error: Chirp is too long"), FAILEDCODE)
 			return
 		}
 
-		bearerToken, err := auth.GetBearerToken(req.Header)
-
+		validId, err := ValidateUserID(req, a.JwtSecret)
 		if err != nil {
 			ErrorJsonResp(resp, err, UNAUTHORIZED)
-		}
-
-		ValidId, err := auth.ValidateJWT(bearerToken, a.JwtSecret)
-		if err != nil {
-			ErrorJsonResp(resp, err, UNAUTHORIZED)
+			return
 		}
 
 		chirpDbData, err := a.DbQueries.CreateChirps(req.Context(), database.CreateChirpsParams{
@@ -270,7 +268,7 @@ func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Ha
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 			Body:      SanatizeProfane(resData.Body),
-			UserID:    ValidId})
+			UserID:    validId})
 
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
@@ -282,6 +280,17 @@ func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Ha
 			Handler{Ns: BACKEND_NS, Handle: a.MiddlewareGetChirps(chirpDbData.ID)},
 			fmt.Sprintf("/chirps/%s", chirpDbData.ID.String()),
 			GET_METHOD)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+		}
+
+		err = HandleHandler(
+			mux,
+			Handler{Ns: BACKEND_NS, Handle: a.MiddlewareDeleteChirpHandler(chirpDbData.ID)},
+			fmt.Sprintf("/chirps/%s", chirpDbData.ID.String()),
+			DETELE_METHOD)
 
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
@@ -310,7 +319,22 @@ func (a *ApiConfig) MiddlewareAddChirp(chirpLen int, mux *http.ServeMux) http.Ha
 
 }
 
-func (a *ApiConfig) MiddleWareCreateUserHandle() http.Handler {
+func ValidateUserID(req *http.Request, secret string) (uuid.UUID, error) {
+	bearerToken, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+
+	validId, err := auth.ValidateJWT(bearerToken, secret)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+
+	return validId, nil
+
+}
+
+func (a *ApiConfig) MiddlewareCreateUserHandle() http.Handler {
 	type NewUserJson struct {
 		Password string `json:"password"`
 		Email    string `json:"email"`
@@ -326,12 +350,7 @@ func (a *ApiConfig) MiddleWareCreateUserHandle() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 
 		emailStruct := &NewUserJson{}
-		reqData, err := io.ReadAll(req.Body)
-		if err != nil {
-			ErrorJsonResp(resp, err, FAILEDCODE)
-		}
-
-		err = json.Unmarshal(reqData, emailStruct)
+		err := ParseJson(req, emailStruct)
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
@@ -371,7 +390,59 @@ func (a *ApiConfig) MiddleWareCreateUserHandle() http.Handler {
 	})
 }
 
-func (a *ApiConfig) MiddleWareResetUsers() http.Handler {
+func (a *ApiConfig) MiddlewareUpdateUserHandle() http.Handler {
+
+	type UpdatedUserDbJson struct {
+		ID         uuid.UUID `json:"id"`
+		CreatedAt  time.Time `json:"created_at"`
+		UpdateddAt time.Time `json:"updated_at"`
+		Email      string    `json:"email"`
+	}
+
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+
+		UpdateUserStruct := &UserJson{}
+
+		userID, err := ValidateUserID(req, a.JwtSecret)
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+		}
+
+		err = ParseJson(req, UpdateUserStruct)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		HashedPassword, err := auth.HashPassword(UpdateUserStruct.Password)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		updatedUser, err := a.DbQueries.UpdateUser(req.Context(), database.UpdateUserParams{
+			ID:             userID,
+			UpdatedAt:      time.Now(),
+			Email:          UpdateUserStruct.Email,
+			HashedPassword: HashedPassword})
+
+		userDbStruct := UpdatedUserDbJson{
+			ID:         updatedUser.ID,
+			Email:      updatedUser.Email,
+			CreatedAt:  updatedUser.CreatedAt,
+			UpdateddAt: updatedUser.UpdatedAt}
+
+		updateData, err := json.Marshal(userDbStruct)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		resp.Header().Set("Content-Type", "application:json")
+		resp.WriteHeader(OKCODE)
+		resp.Write(updateData)
+
+	})
+}
+
+func (a *ApiConfig) MiddlewareResetUsers() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		if os.Getenv("PLATFORM") != "dev" {
 			ErrorJsonResp(resp, fmt.Errorf("Forbidden"), FORBIDDENCODE)
@@ -384,7 +455,20 @@ func (a *ApiConfig) MiddleWareResetUsers() http.Handler {
 	})
 }
 
-func (a *ApiConfig) MiddleWareResetChirps() http.Handler {
+func (a *ApiConfig) MiddlewareResetRefreshTokens() http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		if os.Getenv("PLATFORM") != "dev" {
+			ErrorJsonResp(resp, fmt.Errorf("Forbidden"), FORBIDDENCODE)
+		}
+		err := a.DbQueries.ResetRefreshToken(req.Context())
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+	})
+
+}
+
+func (a *ApiConfig) MiddlewareResetChirps() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		if os.Getenv("PLATFORM") != "dev" {
 			ErrorJsonResp(resp, fmt.Errorf("Forbidden"), FORBIDDENCODE)
@@ -447,12 +531,7 @@ func (a *ApiConfig) MiddlewareLoginHandler() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		userJson := &UserJson{}
 
-		reqData, err := io.ReadAll(req.Body)
-		if err != nil {
-			ErrorJsonResp(resp, err, FAILEDCODE)
-		}
-
-		err = json.Unmarshal(reqData, userJson)
+		err := ParseJson(req, userJson)
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
@@ -508,6 +587,39 @@ func (a *ApiConfig) MiddlewareLoginHandler() http.Handler {
 	})
 }
 
+func (a *ApiConfig) MiddlewareDeleteChirpHandler(id uuid.UUID) http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+
+		userId, err := ValidateUserID(req, a.JwtSecret)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+			return
+		}
+
+		chirpData, err := a.DbQueries.GetChirps(req.Context(), id)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+			return
+		}
+		if chirpData.UserID != userId {
+			ErrorJsonResp(resp, fmt.Errorf("User %s, forbidden to delete chirp %s", userId.String(), id.String()), FORBIDDENCODE)
+			return
+		}
+
+		err = a.DbQueries.DeleteChirps(req.Context(), database.DeleteChirpsParams{ID: id, UserID: userId})
+
+		if err != nil {
+			ErrorJsonResp(resp, err, NOTFOUNDCODE)
+			return
+		}
+
+		resp.WriteHeader(UPDATECODE)
+		resp.Write([]byte{})
+
+	})
+}
+
 func HandleHandler(mux *http.ServeMux, handle Handler, hndlName, mthdName string) error {
 
 	if handle.Ns == "" {
@@ -554,7 +666,6 @@ func main() {
 	endpointMap := Handlers{}
 
 	fileServeHandler := http.FileServer(http.Dir("."))
-	//ApiServeHandler := http.
 
 	// admin handlers
 	endpointMap["/reset"] = handlerMap{POST_METHOD: Handler{Ns: ADMIN_NS, Handle: a.MiddlewareReqResetHandle()}}
@@ -567,9 +678,15 @@ func main() {
 
 	endpointMap["/refresh"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareRefresh()}}
 	endpointMap["/revoke"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareRevokeRefreshToken()}}
-	endpointMap["/users"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddleWareCreateUserHandle()}}
+
+	endpointMap["/users"] = handlerMap{
+		POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareCreateUserHandle()},
+		PUT_METHOD:  Handler{Ns: BACKEND_NS, Handle: a.MiddlewareUpdateUserHandle()}}
+
 	endpointMap["/healthz"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: RedinisHandler()}}
 	endpointMap["/login"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareLoginHandler()}}
+
+	//endpointMap["/delete"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareDeleteChirpHandler()}}
 
 	// frontend handlers
 	endpointMap["/"] = handlerMap{GET_METHOD: Handler{Ns: FRONTEND_NS, Handle: a.MiddlewareIncHits(http.StripPrefix("/app", fileServeHandler))}}

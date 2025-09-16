@@ -73,6 +73,15 @@ func (q *Queries) GetRefreshToken(ctx context.Context, token string) (RefreshTok
 	return i, err
 }
 
+const resetRefreshToken = `-- name: ResetRefreshToken :exec
+DELETE FROM refresh_tokens
+`
+
+func (q *Queries) ResetRefreshToken(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, resetRefreshToken)
+	return err
+}
+
 const revokeRefreshToken = `-- name: RevokeRefreshToken :exec
 UPDATE refresh_tokens 
 SET revoked_at = $2, updated_at = $2 WHERE token = $1

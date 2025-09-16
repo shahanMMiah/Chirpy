@@ -1,3 +1,6 @@
+-- name: ResetRefreshToken :exec
+DELETE FROM refresh_tokens;
+
 -- name: CreateRefreshToken :one
 INSERT INTO refresh_tokens( token, created_at, updated_at, user_id, expories_at, revoked_at)
 values(

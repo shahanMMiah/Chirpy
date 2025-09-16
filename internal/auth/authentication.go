@@ -15,6 +15,7 @@ import (
 )
 
 const BEARERKEY = "Authorization"
+const CHIRPY = "Chirpy"
 
 func HashPassword(password string) (string, error) {
 	hashData, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -35,7 +36,7 @@ func CheckPasswordHash(password, hash string) error {
 func MakeJWT(userId uuid.UUID, tokenSecret string, expires time.Duration) (string, error) {
 
 	claims := jwt.RegisteredClaims{
-		Issuer:    "Chirpy",
+		Issuer:    CHIRPY,
 		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(expires).UTC()),
 		Subject:   userId.String(),
