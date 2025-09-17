@@ -49,6 +49,7 @@ type UserDbJson struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 
 func RedinisHandler() http.Handler {
@@ -335,21 +336,10 @@ func ValidateUserID(req *http.Request, secret string) (uuid.UUID, error) {
 }
 
 func (a *ApiConfig) MiddlewareCreateUserHandle() http.Handler {
-	type NewUserJson struct {
-		Password string `json:"password"`
-		Email    string `json:"email"`
-	}
-
-	type NewUserDbJson struct {
-		ID         uuid.UUID `json:"id"`
-		CreatedAt  time.Time `json:"created_at"`
-		UpdateddAt time.Time `json:"updated_at"`
-		Email      string    `json:"email"`
-	}
 
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 
-		emailStruct := &NewUserJson{}
+		emailStruct := &UserJson{}
 		err := ParseJson(req, emailStruct)
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
@@ -372,11 +362,12 @@ func (a *ApiConfig) MiddlewareCreateUserHandle() http.Handler {
 			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
 
-		userDbStruct := NewUserDbJson{
-			ID:         userDbQuiery.ID,
-			CreatedAt:  userDbQuiery.CreatedAt,
-			UpdateddAt: userDbQuiery.CreatedAt,
-			Email:      userDbQuiery.Email}
+		userDbStruct := UserDbJson{
+			ID:          userDbQuiery.ID,
+			CreatedAt:   userDbQuiery.CreatedAt,
+			UpdateddAt:  userDbQuiery.CreatedAt,
+			Email:       userDbQuiery.Email,
+			IsChirpyRed: userDbQuiery.IsChirpyRed}
 
 		userData, err := json.Marshal(userDbStruct)
 		if err != nil {
@@ -391,13 +382,6 @@ func (a *ApiConfig) MiddlewareCreateUserHandle() http.Handler {
 }
 
 func (a *ApiConfig) MiddlewareUpdateUserHandle() http.Handler {
-
-	type UpdatedUserDbJson struct {
-		ID         uuid.UUID `json:"id"`
-		CreatedAt  time.Time `json:"created_at"`
-		UpdateddAt time.Time `json:"updated_at"`
-		Email      string    `json:"email"`
-	}
 
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 
@@ -424,11 +408,12 @@ func (a *ApiConfig) MiddlewareUpdateUserHandle() http.Handler {
 			Email:          UpdateUserStruct.Email,
 			HashedPassword: HashedPassword})
 
-		userDbStruct := UpdatedUserDbJson{
-			ID:         updatedUser.ID,
-			Email:      updatedUser.Email,
-			CreatedAt:  updatedUser.CreatedAt,
-			UpdateddAt: updatedUser.UpdatedAt}
+		userDbStruct := UserDbJson{
+			ID:          updatedUser.ID,
+			Email:       updatedUser.Email,
+			CreatedAt:   updatedUser.CreatedAt,
+			UpdateddAt:  updatedUser.UpdatedAt,
+			IsChirpyRed: updatedUser.IsChirpyRed}
 
 		updateData, err := json.Marshal(userDbStruct)
 		if err != nil {
@@ -573,7 +558,8 @@ func (a *ApiConfig) MiddlewareLoginHandler() http.Handler {
 			UpdateddAt:   userDb.CreatedAt,
 			Email:        userDb.Email,
 			Token:        signedJwtToken,
-			RefreshToken: refreshToken}
+			RefreshToken: refreshToken,
+			IsChirpyRed:  userDb.IsChirpyRed}
 
 		userDbjsonData, err := json.Marshal(userDbjson)
 		if err != nil {
@@ -582,6 +568,57 @@ func (a *ApiConfig) MiddlewareLoginHandler() http.Handler {
 
 		resp.Header().Set("Content-type", "application:json")
 		resp.WriteHeader(OKCODE)
+		resp.Write(userDbjsonData)
+
+	})
+}
+
+func (a *ApiConfig) MiddlewareUpgradeHandler() http.Handler {
+	type webhookStruct struct {
+		Event string `json:"event"`
+		Data  struct {
+			Userid string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		webhook := &webhookStruct{}
+
+		err := ParseJson(req, webhook)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		if webhook.Event != UPGRADEEVENT {
+			resp.WriteHeader(UPDATECODE)
+			resp.Write([]byte{})
+			return
+		}
+
+		userid, err := uuid.Parse(webhook.Data.Userid)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		upgradedUser, err := a.DbQueries.UpgradeChirpsRed(req.Context(), userid)
+
+		if err != nil {
+			ErrorJsonResp(resp, err, NOTFOUNDCODE)
+		}
+
+		userDbjson := UserDbJson{ID: upgradedUser.ID,
+			CreatedAt:   upgradedUser.CreatedAt,
+			UpdateddAt:  upgradedUser.CreatedAt,
+			Email:       upgradedUser.Email,
+			IsChirpyRed: upgradedUser.IsChirpyRed}
+
+		userDbjsonData, err := json.Marshal(userDbjson)
+		if err != nil {
+			ErrorJsonResp(resp, err, FAILEDCODE)
+		}
+
+		resp.Header().Set("Content-type", "application:json")
+		resp.WriteHeader(UPDATECODE)
 		resp.Write(userDbjsonData)
 
 	})
@@ -685,6 +722,8 @@ func main() {
 
 	endpointMap["/healthz"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: RedinisHandler()}}
 	endpointMap["/login"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareLoginHandler()}}
+
+	endpointMap["/polka/webhooks"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareUpgradeHandler()}}
 
 	//endpointMap["/delete"] = handlerMap{POST_METHOD: Handler{Ns: BACKEND_NS, Handle: a.MiddlewareDeleteChirpHandler()}}
 

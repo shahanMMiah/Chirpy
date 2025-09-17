@@ -11,6 +11,8 @@ const DETELE_METHOD = "DELETE"
 
 const CENSORSTR = "****"
 
+const UPGRADEEVENT = "user.upgraded"
+
 const FAILEDCODE = 400
 const UNAUTHORIZED = 401
 const FORBIDDENCODE = 403
