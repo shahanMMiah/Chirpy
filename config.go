@@ -12,6 +12,9 @@ const DETELE_METHOD = "DELETE"
 const CENSORSTR = "****"
 
 const UPGRADEEVENT = "user.upgraded"
+const AUTHER_ID_QUERY = "author_id"
+const SORT_QUERY = "sort"
+const DESC_QUERY_KEY = "desc"
 
 const FAILEDCODE = 400
 const UNAUTHORIZED = 401

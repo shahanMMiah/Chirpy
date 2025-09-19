@@ -14,8 +14,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const BEARERKEY = "Authorization"
+const AUTHKEY = "Authorization"
 const CHIRPY = "Chirpy"
+const BEARERPREF = "Bearer"
+const POLKAPREF = "ApiKey"
 
 func HashPassword(password string) (string, error) {
 	hashData, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -69,17 +71,30 @@ func ValidateJWT(signedToken, tokenSecret string) (uuid.UUID, error) {
 }
 
 func GetBearerToken(h http.Header) (string, error) {
-	bearer := h.Get(BEARERKEY)
-	if bearer == "" {
-		return "", fmt.Errorf("Could not find %s Header", BEARERKEY)
+	tokenstring, err := GetHeaderKey(h, AUTHKEY, BEARERPREF)
+	return tokenstring, err
+}
+
+func GetAPIKey(h http.Header) (string, error) {
+	tokenstring, err := GetHeaderKey(h, AUTHKEY, POLKAPREF)
+	return tokenstring, err
+
+}
+
+func GetHeaderKey(h http.Header, hkey, keyPefix string) (string, error) {
+	headerKey := h.Get(hkey)
+	if headerKey == "" {
+		return "", fmt.Errorf("Could not find %s Header", AUTHKEY)
 	}
 
-	tokenstring, found := strings.CutPrefix(bearer, "Bearer ")
+	tokenstring, found := strings.CutPrefix(headerKey, fmt.Sprintf("%s ", keyPefix))
+
 	if !found {
-		return "", fmt.Errorf("Bearer prefix not found in header %s", bearer)
+		return "", fmt.Errorf("header prefix not found in header %s", headerKey)
 	}
 
 	return tokenstring, nil
+
 }
 
 func MakeRefreshToken() (string, error) {

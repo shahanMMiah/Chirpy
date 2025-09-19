@@ -189,11 +189,39 @@ func (a *ApiConfig) MiddlewareGetChirps(id uuid.UUID) http.Handler {
 
 func (a *ApiConfig) MiddlewareGetAllChirps() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-		chirpsDb, err := a.DbQueries.GetAllChirps(req.Context())
-		if err != nil {
-			ErrorJsonResp(resp, err, FAILEDCODE)
-			return
 
+		quries := req.URL.Query()
+		autherId := quries.Get(AUTHER_ID_QUERY)
+
+		chirpsDb := make([]database.Chirp, 0)
+
+		if autherId != "" {
+			aUid, err := uuid.Parse(autherId)
+
+			if err != nil {
+				ErrorJsonResp(resp, fmt.Errorf("unable to parse %s as uuid", autherId), FAILEDCODE)
+			}
+
+			chirpsDb, err = a.DbQueries.GetUserChirps(req.Context(), aUid)
+			if err != nil {
+				ErrorJsonResp(resp, err, NOTFOUNDCODE)
+			}
+
+		} else {
+
+			allchirpsDb, err := a.DbQueries.GetAllChirps(req.Context())
+			if err != nil {
+				ErrorJsonResp(resp, err, FAILEDCODE)
+			}
+
+			chirpsDb = allchirpsDb
+		}
+
+		sortQuery := quries.Get(SORT_QUERY)
+
+		if sortQuery == DESC_QUERY_KEY {
+
+			slices.SortFunc(chirpsDb, func(i, j database.Chirp) int { return j.CreatedAt.Compare(i.CreatedAt) })
 		}
 
 		chirpsJson := []ChirpJson{}
@@ -206,10 +234,6 @@ func (a *ApiConfig) MiddlewareGetAllChirps() http.Handler {
 				Body:      c.Body,
 				UserID:    c.UserID})
 		}
-
-		slices.SortFunc(chirpsJson, func(a, b ChirpJson) int {
-			return a.CreatedAt.Compare(b.CreatedAt)
-		})
 
 		jsonData, err := json.Marshal(chirpsJson)
 		if err != nil {
@@ -584,7 +608,13 @@ func (a *ApiConfig) MiddlewareUpgradeHandler() http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		webhook := &webhookStruct{}
 
-		err := ParseJson(req, webhook)
+		ApiKey, err := auth.GetAPIKey(req.Header)
+
+		if err != nil || ApiKey != os.Getenv("POLKA_KEY") {
+			ErrorJsonResp(resp, err, UNAUTHORIZED)
+
+		}
+		err = ParseJson(req, webhook)
 		if err != nil {
 			ErrorJsonResp(resp, err, FAILEDCODE)
 		}
